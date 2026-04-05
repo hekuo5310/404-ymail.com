@@ -3367,6 +3367,7 @@ window.addEventListener('DOMContentLoaded', function() {
         // 显示警情通报页面
         function showPolicePage() {
             policePage.style.display = 'block';
+            saveGameProgress();
         }
         
         // 返回聊天界面
@@ -3375,6 +3376,7 @@ window.addEventListener('DOMContentLoaded', function() {
             // 继续聊天流程
             currentKeyword = "你还好吗";
             systemPromptShown = false;
+            saveGameProgress();
             showSystemPrompt();
         });
         
@@ -4279,9 +4281,255 @@ window.addEventListener('DOMContentLoaded', function() {
         let dragStartX, dragStartY;
         let imageOffsetX = 0, imageOffsetY = 0;
         let startOffsetX = 0, startOffsetY = 0;
+        const SAVE_COOKIE_PREFIX = '404mail_save_';
+        const SAVE_COOKIE_META = `${SAVE_COOKIE_PREFIX}meta`;
+        const SAVE_COOKIE_CHUNK_SIZE = 3000;
+        const SAVE_COOKIE_DAYS = 365;
+        let isRestoringSave = false;
+
+        function setCookie(name, value, days = SAVE_COOKIE_DAYS) {
+            const expires = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toUTCString();
+            document.cookie = `${name}=${encodeURIComponent(value)}; expires=${expires}; path=/; SameSite=Lax`;
+        }
+
+        function getCookie(name) {
+            const cookiePairs = document.cookie ? document.cookie.split('; ') : [];
+            for (const pair of cookiePairs) {
+                const separatorIndex = pair.indexOf('=');
+                const cookieName = separatorIndex >= 0 ? pair.substring(0, separatorIndex) : pair;
+                if (cookieName === name) {
+                    return decodeURIComponent(separatorIndex >= 0 ? pair.substring(separatorIndex + 1) : '');
+                }
+            }
+            return null;
+        }
+
+        function deleteCookie(name) {
+            document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; SameSite=Lax`;
+        }
+
+        function clearSaveCookies() {
+            const metaRaw = getCookie(SAVE_COOKIE_META);
+
+            if (metaRaw) {
+                try {
+                    const meta = JSON.parse(metaRaw);
+                    for (let i = 0; i < (meta.count || 0); i++) {
+                        deleteCookie(`${SAVE_COOKIE_PREFIX}${i}`);
+                    }
+                } catch (error) {
+                    console.warn('清理旧存档元信息失败：', error);
+                }
+            }
+
+            for (let i = 0; i < 20; i++) {
+                deleteCookie(`${SAVE_COOKIE_PREFIX}${i}`);
+            }
+
+            deleteCookie(SAVE_COOKIE_META);
+        }
+
+        function getActiveOverlay() {
+            if (emailModal.style.display === 'flex') return 'email';
+            if (reportModal.style.display === 'flex') return 'report';
+            if (recordingModal.style.display === 'flex') return 'recording';
+            if (terrorPage.style.display === 'block') return 'terror';
+            if (policePage.style.display === 'block') return 'police';
+            return 'none';
+        }
+
+        function serializeConversationHistory() {
+            return conversationHistory.map((item) => ([
+                item.sender || '',
+                item.content || '',
+                item.type || '',
+                item.time || '',
+                item.date || ''
+            ]));
+        }
+
+        function normalizeSavedHistory(history = []) {
+            return history.map((item) => {
+                if (Array.isArray(item)) {
+                    return {
+                        sender: item[0] || '',
+                        content: item[1] || '',
+                        type: item[2] || '',
+                        time: item[3] || '',
+                        date: item[4] || chatDates[0]
+                    };
+                }
+
+                return {
+                    sender: item.sender || '',
+                    content: item.content || '',
+                    type: item.type || '',
+                    time: item.time || '',
+                    date: item.date || chatDates[0]
+                };
+            });
+        }
+
+        function buildSaveData() {
+            return {
+                version: 1,
+                currentDateIndex,
+                currentKeyword,
+                systemPromptShown,
+                reportAnswers,
+                conversationHistory: serializeConversationHistory(),
+                emailClosed: mainContainer.style.display === 'block',
+                activeOverlay: getActiveOverlay()
+            };
+        }
+
+        function saveGameProgress() {
+            if (isRestoringSave) return;
+
+            try {
+                const saveData = JSON.stringify(buildSaveData());
+                const previousMetaRaw = getCookie(SAVE_COOKIE_META);
+                let previousCount = 0;
+
+                if (previousMetaRaw) {
+                    try {
+                        previousCount = JSON.parse(previousMetaRaw).count || 0;
+                    } catch (error) {
+                        console.warn('读取旧存档元信息失败：', error);
+                    }
+                }
+
+                const chunkCount = Math.max(1, Math.ceil(saveData.length / SAVE_COOKIE_CHUNK_SIZE));
+
+                for (let i = 0; i < chunkCount; i++) {
+                    const chunk = saveData.slice(i * SAVE_COOKIE_CHUNK_SIZE, (i + 1) * SAVE_COOKIE_CHUNK_SIZE);
+                    setCookie(`${SAVE_COOKIE_PREFIX}${i}`, chunk);
+                }
+
+                for (let i = chunkCount; i < previousCount; i++) {
+                    deleteCookie(`${SAVE_COOKIE_PREFIX}${i}`);
+                }
+
+                setCookie(SAVE_COOKIE_META, JSON.stringify({
+                    version: 1,
+                    count: chunkCount,
+                    updatedAt: Date.now()
+                }));
+            } catch (error) {
+                console.warn('保存游戏存档失败：', error);
+            }
+        }
+
+        function loadGameProgress() {
+            try {
+                const metaRaw = getCookie(SAVE_COOKIE_META);
+                if (!metaRaw) return null;
+
+                const meta = JSON.parse(metaRaw);
+                if (!meta.count) return null;
+
+                let saveData = '';
+                for (let i = 0; i < meta.count; i++) {
+                    const chunk = getCookie(`${SAVE_COOKIE_PREFIX}${i}`);
+                    if (chunk === null) {
+                        return null;
+                    }
+                    saveData += chunk;
+                }
+
+                return JSON.parse(saveData);
+            } catch (error) {
+                console.warn('读取游戏存档失败：', error);
+                clearSaveCookies();
+                return null;
+            }
+        }
+
+        function restoreConversationHistory(history = []) {
+            const normalizedHistory = normalizeSavedHistory(history);
+            let previousDate = null;
+
+            chatWindow.innerHTML = '';
+            conversationHistory = normalizedHistory.map((item) => ({ ...item }));
+
+            normalizedHistory.forEach((message) => {
+                if (previousDate && message.date !== previousDate) {
+                    addHistoryNote(message.date);
+                }
+
+                renderMessage(message, message.date, { recordHistory: false });
+                previousDate = message.date;
+            });
+
+            chatWindow.scrollTop = chatWindow.scrollHeight;
+        }
+
+        function restoreGameProgress(saveData) {
+            if (!saveData) return false;
+
+            isRestoringSave = true;
+
+            try {
+                currentDateIndex = Math.max(0, Math.min(saveData.currentDateIndex || 0, chatDates.length - 1));
+                currentKeyword = saveData.currentKeyword || "start";
+                systemPromptShown = !!saveData.systemPromptShown;
+                reportAnswers = saveData.reportAnswers || {};
+                isWaitingForResponse = false;
+
+                sendButton.disabled = false;
+                typingIndicator.style.display = 'none';
+                currentDateElement.textContent = chatDates[currentDateIndex];
+
+                emailModal.style.display = saveData.emailClosed ? 'none' : 'flex';
+                mainContainer.style.display = saveData.emailClosed ? 'block' : 'none';
+                reportModal.style.display = 'none';
+                recordingModal.style.display = 'none';
+                terrorPage.style.display = 'none';
+                policePage.style.display = 'none';
+
+                if (saveData.emailClosed) {
+                    restoreConversationHistory(saveData.conversationHistory || []);
+                    updateInputPlaceholder();
+                } else {
+                    chatWindow.innerHTML = '';
+                    conversationHistory = [];
+                }
+
+                switch (saveData.activeOverlay) {
+                    case 'report':
+                        if (saveData.emailClosed) showReportModal();
+                        break;
+                    case 'recording':
+                        if (saveData.emailClosed) showRecordingModal();
+                        break;
+                    case 'terror':
+                        if (saveData.emailClosed) showTerrorPage();
+                        break;
+                    case 'police':
+                        if (saveData.emailClosed) showPolicePage();
+                        break;
+                    default:
+                        if (saveData.emailClosed && !systemPromptShown) {
+                            setTimeout(() => {
+                                showSystemPrompt();
+                            }, 300);
+                        }
+                        break;
+                }
+
+                return true;
+            } catch (error) {
+                console.warn('恢复游戏存档失败：', error);
+                clearSaveCookies();
+                return false;
+            } finally {
+                isRestoringSave = false;
+            }
+        }
         
         // 渲染聊天消息
-    function renderMessage(message, date = null) {
+    function renderMessage(message, date = null, options = {}) {
+    const { recordHistory = true } = options;
     const messageDiv = document.createElement('div');
     messageDiv.className = `message ${message.type}`;
     
@@ -4336,10 +4584,12 @@ if (contentText.includes('.jpg')) {
             chatWindow.appendChild(messageDiv);
             
             // 添加到历史记录
-            conversationHistory.push({
-                ...message,
-                date: date || chatDates[currentDateIndex]
-            });
+            if (recordHistory) {
+                conversationHistory.push({
+                    ...message,
+                    date: date || chatDates[currentDateIndex]
+                });
+            }
             
             // 滚动到底部
             chatWindow.scrollTop = chatWindow.scrollHeight;
@@ -4503,6 +4753,7 @@ if (contentText.includes('.jpg')) {
                     
                     // 更新输入框提示
                     updateInputPlaceholder();
+                    saveGameProgress();
                 }, 800);
             }
         }
@@ -4537,6 +4788,8 @@ if (contentText.includes('.jpg')) {
         // 初始化聊天记录
         function initializeChat() {
             chatWindow.innerHTML = '';
+            conversationHistory = [];
+            systemPromptShown = false;
             const currentDate = chatDates[currentDateIndex];
             currentDateElement.textContent = currentDate;
             
@@ -4554,6 +4807,7 @@ if (contentText.includes('.jpg')) {
             
             // 滚动到底部
             chatWindow.scrollTop = chatWindow.scrollHeight;
+            saveGameProgress();
         }
         
         // 加载指定日期的消息
@@ -4577,6 +4831,7 @@ if (contentText.includes('.jpg')) {
             currentDateIndex = dateIndex;
             currentDateElement.textContent = date;
             systemPromptShown = false;
+            saveGameProgress();
             
             // 延迟显示新的系统提示
             setTimeout(() => {
@@ -4733,6 +4988,7 @@ if (contentText.includes('.jpg')) {
             }, 100);
             
             reportModal.style.display = 'flex';
+            saveGameProgress();
         }
         
         // 提交举报信
@@ -4751,6 +5007,7 @@ if (contentText.includes('.jpg')) {
             reportAnswers.blank4 = blank4;
             reportAnswers.blank5 = blank5;
             reportAnswers.blank6 = blank6;
+            saveGameProgress();
             
             // 验证所有字段是否填写
             if (!blank1 || !blank2 || !blank3 || !blank4 || !blank5 || !blank6) {
@@ -4806,6 +5063,7 @@ if (contentText.includes('.jpg')) {
                     reportModal.style.display = 'none';
                     currentKeyword = "录音文件";
                     systemPromptShown = false;
+                    saveGameProgress();
                     showRecordingModal();
                 }, 3000);
             } else {
@@ -4982,6 +5240,7 @@ window.addEventListener('load', function() {
         function showRecordingModal() {
             recordingModal.style.display = 'flex';
             recordingTranscript.innerHTML = '';
+            saveGameProgress();
             
             // 逐段显示录音文本
             let segmentIndex = 0;
@@ -5169,6 +5428,7 @@ window.addEventListener('load', function() {
             terrorGif.style.display = 'none';
             bloodOverlay.style.display = 'none';
             borderFlash.style.display = 'none';
+            saveGameProgress();
         }
         
         // 播放录音打字音效视觉反馈
@@ -5314,6 +5574,8 @@ function sendUserMessage() {
                                     showSystemPrompt();
                                 }, 1000);
                             }
+
+                            saveGameProgress();
                         }
                     }, 500);
                 }
@@ -5336,14 +5598,13 @@ function sendUserMessage() {
         setTimeout(() => {
             showSystemPrompt();
         }, 1000);
+
+        saveGameProgress();
     }
 }
         
         // 页面加载完成后初始化
         window.addEventListener('DOMContentLoaded', () => {
-            // 显示邮件弹窗
-            emailModal.style.display = 'flex';
-            
             // 关闭邮件弹窗
             closeEmailBtn.addEventListener('click', () => {
                 emailModal.style.display = 'none';
@@ -5371,8 +5632,14 @@ function sendUserMessage() {
             reportModal.addEventListener('click', (e) => {
                 if (e.target === reportModal) {
                     reportModal.style.display = 'none';
+                    saveGameProgress();
                 }
             });
+
+            const savedGame = loadGameProgress();
+            if (!restoreGameProgress(savedGame)) {
+                emailModal.style.display = 'flex';
+            }
         });
     </script>
 </body>
